@@ -248,7 +248,7 @@ html,body{height:100%;margin:0;padding:0;-webkit-font-smoothing:antialiased;-moz
   let replyTo = null;
   window.sampleMembers = window.sampleMembers || [];
 
-  function escapeHtml(s){ return (''+s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]); }
+  function escapeHtml(s){ return (''+s).replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]); }
 
   function formatTime(ts) {
     const d = new Date(ts || Date.now());
@@ -615,21 +615,15 @@ html,body{height:100%;margin:0;padding:0;-webkit-font-smoothing:antialiased;-moz
     // TypingEngine: configure & start if available
     try{
       if(window.TypingEngine && typeof window.TypingEngine.configure === 'function'){
-        // Passive engine (SimulationEngine drives triggers). Keep low avgEveryMs for demo.
-        window.TypingEngine.configure({ seedBase: window.TypingEngine.getConfig?.()?.seedBase ?? null, minDurationMs: 160 });
+        window.TypingEngine.configure({ seedBase: window.TypingEngine.getConfig?.()?.seedBase ?? null, avgEveryMs: 12000, burstChance: 0.45 });
+        window.TypingEngine.start();
       }
     }catch(e){ console.warn('Safe init TypingEngine failed', e); }
 
     // If there is a SimulationEngine or UI adapter, call their ready hook if present (defensive)
     try{
-      if(window.SimulationEngine && typeof window.SimulationEngine._cfg === 'function'){
-        // ensure the simulation defaults are reasonable for demo
-        window.SimulationEngine.configure({ seedBase: 4000, ratePerMin: 45 });
-      }
-      if(window.SimulationEngine && typeof window.SimulationEngine.start === 'function' && !window._abrox.disableAutoStart){
-        // do not auto-start if user disabled autoStart
-        // start manually to let user control simulation
-        // window.SimulationEngine.start();
+      if(window.simulationEngine && typeof window.simulationEngine.onAppReady === 'function'){
+        window.simulationEngine.onAppReady();
       }
       if(window.uiAdapter && typeof window.uiAdapter.init === 'function'){
         window.uiAdapter.init({ renderMessage: window.renderMessage, setSampleMembers: window._abrox.setSampleMembers });
