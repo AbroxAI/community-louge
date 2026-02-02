@@ -423,4 +423,231 @@ html,body{height:100%;margin:0;padding:0;-webkit-font-smoothing:antialiased;-moz
   window.setReplyTo = function(msgId){
     const target = document.querySelector(`[data-id="${msgId}"]`);
     if(!target) return;
-    const senderText = target.querySelector(
+    const senderText = target.querySelector('.sender') ? target.querySelector('.sender').textContent : 'Message';
+    const snippet = target.querySelector('.content') ? target.querySelector('.content').textContent.slice(0,120) : '';
+    const container = document.getElementById('replyPreviewContainer');
+    container.innerHTML = `<div class="reply-preview" id="replyPreview">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <div style="font-weight:700">${escapeHtml(senderText)}</div>
+        <div class="close-btn" id="replyClose" title="Cancel">✕</div>
+      </div>
+      <div class="snippet">${escapeHtml(snippet)}</div>
+    </div>`;
+    replyTo = msgId;
+
+    // wire close
+    const closeBtn = document.getElementById('replyClose');
+    if(closeBtn) closeBtn.addEventListener('click', ()=> {
+      replyTo = null;
+      const cont = document.getElementById('replyPreviewContainer');
+      if(cont) cont.innerHTML = '';
+    });
+  };
+
+  // send message helper (creates a minimal message object and renders it)
+  function doSendMessage(text){
+    if(!text || !text.trim()) return;
+    const m = {
+      id: 'local_' + Date.now(),
+      name: 'You',
+      displayName: 'You',
+      role: 'VERIFIED',
+      avatar: '', // your own avatar path if any
+      text: (replyTo ? (`↪ ${document.querySelector(`[data-id="${replyTo}"] .sender`)?.textContent || 'Reply'}: ` : '') + text,
+      out: true,
+      time: Date.now(),
+      replyTo: replyTo || null,
+      pinned: false,
+      attachment: null
+    };
+    // render locally
+    window.renderMessage(m, true);
+    // clear UI
+    const input = document.getElementById('input');
+    if(input) { input.value = ''; toggleSendButton(); }
+    // clear reply preview
+    const cont = document.getElementById('replyPreviewContainer');
+    if(cont) cont.innerHTML = '';
+    replyTo = null;
+
+    // Optionally: feed into MessagePool or SimulationEngine if they expose an API
+    try{
+      if(window.MessagePool && typeof window.MessagePool.messages !== 'undefined'){
+        // append to pool in-memory (keeps UI + pool relatively in sync)
+        window.MessagePool.messages.unshift(m);
+        // update index map
+        if(window.MessagePool._idIndex) window.MessagePool._idIndex[m.id] = 0;
+      }
+      if(window.simulationEngine && typeof window.simulationEngine.onLocalSend === 'function'){
+        window.simulationEngine.onLocalSend(m);
+      }
+    }catch(e){}
+  }
+
+  // show/hide send button depending on input content
+  function toggleSendButton(){
+    const input = document.getElementById('input');
+    const send = document.getElementById('send');
+    if(!input || !send) return;
+    if(input.value && input.value.trim().length){
+      send.classList.remove('hidden');
+    } else {
+      send.classList.add('hidden');
+    }
+  }
+
+  // wire send events
+  document.addEventListener('click', (e) => {
+    if(e.target.closest && e.target.closest('#send')){
+      const input = document.getElementById('input');
+      if(input) doSendMessage(input.value);
+    }
+  });
+  document.addEventListener('keydown', (e) => {
+    const input = document.getElementById('input');
+    if(!input) return;
+    if(e.key === 'Enter' && !e.shiftKey){
+      e.preventDefault();
+      doSendMessage(input.value);
+    }
+  });
+  document.addEventListener('input', (e) => {
+    if(e.target && e.target.id === 'input') toggleSendButton();
+  });
+
+  // sidebar toggle
+  document.getElementById('membersBtn')?.addEventListener('click', ()=>{
+    const sb = document.getElementById('sidebar');
+    if(!sb) return;
+    const hidden = sb.classList.contains('translate-x-full');
+    if(hidden){
+      sb.classList.remove('translate-x-full');
+      sb.setAttribute('aria-hidden','false');
+    } else {
+      sb.classList.add('translate-x-full');
+      sb.setAttribute('aria-hidden','true');
+    }
+  });
+  document.getElementById('closeSidebar')?.addEventListener('click', ()=>{
+    const sb = document.getElementById('sidebar');
+    if(sb){ sb.classList.add('translate-x-full'); sb.setAttribute('aria-hidden','true'); }
+  });
+
+  // member search simple filter
+  document.getElementById('memberSearch')?.addEventListener('input', (e)=>{
+    const q = (e.target.value || '').toLowerCase().trim();
+    const nodes = Array.from(document.querySelectorAll('#memberList .member-row'));
+    nodes.forEach(n => {
+      const txt = (n.textContent || '').toLowerCase();
+      n.style.display = txt.indexOf(q) === -1 ? 'none' : '';
+    });
+  });
+
+  // unread button scroll behavior
+  const unreadBtn = document.getElementById('unreadBtn');
+  unreadBtn?.addEventListener('click', ()=>{
+    const chat = document.getElementById('chat');
+    if(chat){
+      chat.scrollTop = chat.scrollHeight;
+      unreadBtn.style.display = 'none';
+    }
+  });
+
+  // load persisted pinned message (if any)
+  (function loadPinned(){
+    const txt = localStorage.getItem('pinned_message_text');
+    if(txt){
+      const pb = document.getElementById('pinnedText');
+      if(pb) pb.textContent = txt;
+      const banner = document.getElementById('pinnedBanner');
+      if(banner) banner.classList.remove('hidden');
+    }
+  })();
+
+  // basic auto-scroll hide/unread logic on manual scroll
+  const chatEl = document.getElementById('chat');
+  if(chatEl){
+    let lastScroll = 0;
+    chatEl.addEventListener('scroll', ()=>{
+      const btn = document.getElementById('unreadBtn');
+      if(!btn) return;
+      if(chatEl.scrollTop + chatEl.clientHeight >= chatEl.scrollHeight - 60){
+        btn.style.display = 'none';
+      } else {
+        btn.style.display = 'block';
+      }
+      lastScroll = Date.now();
+    }, {passive:true});
+  }
+
+  /* ------------------ Bootstrapping: wire simulation pieces if present ------------------ */
+  function safeInit(){
+    // connect SyntheticPeople -> UI
+    try{
+      if(window.SyntheticPeople && typeof window.SyntheticPeople.generatePool === 'function'){
+        // if injected already, setSampleMembers will have been called by injectToUI during auto-init.
+        // But ensure UI knows members if they exist.
+        if(window.SyntheticPeople.people && window.SyntheticPeople.people.length){
+          try{ window._abrox.setSampleMembers(window.SyntheticPeople.exportForSimulation()); }catch(e){}
+        } else {
+          // generate a modest pool for immediate preview (not too heavy)
+          try{ window.SyntheticPeople.generatePool({ size: Math.min(500, (window.SyntheticPeople.meta?.size||4872)), seedBase: window.SyntheticPeople.meta?.seedBase || 2026 }); }catch(e){}
+        }
+      }
+    }catch(e){ console.warn('Safe init SyntheticPeople failed', e); }
+
+    // MessagePool: generate a small sample and inject via renderMessage if available
+    try{
+      if(window.MessagePool && typeof window.MessagePool.generatePool === 'function'){
+        // If a big default is configured, generate a lighter preview to avoid freezing UI
+        const previewSize = 500;
+        const targetSize = Math.min(previewSize, Number(window.MessagePool.meta?.size || 500));
+        window.MessagePool.generatePool({ size: targetSize, seedBase: window.MessagePool.meta?.seedBase || 4000, spanDays: window.MessagePool.meta?.spanDays || 365 });
+        if(typeof window.MessagePool.regenerateAndInject === 'function'){
+          window.MessagePool.regenerateAndInject({ inject: true, initialCount: Math.min(40, window.MessagePool.messages.length) });
+        } else if(typeof window.renderMessage === 'function'){
+          const initial = Math.min(20, window.MessagePool.messages.length || 0);
+          for(let i=0;i<initial;i++) try{ window.renderMessage(window.MessagePool.messages[i], false); }catch(e){}
+        }
+      }
+    }catch(e){ console.warn('Safe init MessagePool failed', e); }
+
+    // TypingEngine: configure & start if available
+    try{
+      if(window.TypingEngine && typeof window.TypingEngine.configure === 'function'){
+        // Passive engine (SimulationEngine drives triggers). Keep low avgEveryMs for demo.
+        window.TypingEngine.configure({ seedBase: window.TypingEngine.getConfig?.()?.seedBase ?? null, minDurationMs: 160 });
+      }
+    }catch(e){ console.warn('Safe init TypingEngine failed', e); }
+
+    // If there is a SimulationEngine or UI adapter, call their ready hook if present (defensive)
+    try{
+      if(window.SimulationEngine && typeof window.SimulationEngine._cfg === 'function'){
+        // ensure the simulation defaults are reasonable for demo
+        window.SimulationEngine.configure({ seedBase: 4000, ratePerMin: 45 });
+      }
+      if(window.SimulationEngine && typeof window.SimulationEngine.start === 'function' && !window._abrox.disableAutoStart){
+        // do not auto-start if user disabled autoStart
+        // start manually to let user control simulation
+        // window.SimulationEngine.start();
+      }
+      if(window.uiAdapter && typeof window.uiAdapter.init === 'function'){
+        window.uiAdapter.init({ renderMessage: window.renderMessage, setSampleMembers: window._abrox.setSampleMembers });
+      }
+    }catch(e){}
+  }
+
+  // Run bootstrap after a tiny delay to allow external scripts to auto-init
+  setTimeout(safeInit, 300);
+
+  // expose a quick debug helper to force re-run of safeInit from console
+  window._abrox.bootstrap = safeInit;
+
+  // initial toggle state for send button
+  toggleSendButton();
+
+})(); // end UI glue
+</script>
+
+</body>
+</html>
