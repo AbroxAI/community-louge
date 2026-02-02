@@ -60,6 +60,20 @@
   const ATTACH_TITLES = ['chart.png','screenshot.jpg','trade.mp4','report.pdf','indicator.png'];
   const EMOJI = ['🚀','💎','🔥','📉','📈','🤖','🔒','⚠️','✅','❌','🐳'];
 
+  /* ---------- Avatar providers (mixed to reduce duplicate look) ---------- */
+  const AVATAR_PROVIDERS = [
+    // dicebear new style (seed)
+    'https://api.dicebear.com/8.x/thumbs/svg?seed={seed}',
+    // dicebear identicon legacy
+    'https://avatars.dicebear.com/api/identicon/{seed}.svg',
+    // multiavatar (png)
+    'https://api.multiavatar.com/{seed}.png',
+    // simple two-letter initials avatar
+    'https://ui-avatars.com/api/?name={seed}&background=111827&color=ffffff&bold=true',
+    // robohash (robot/cute set)
+    'https://robohash.org/{seed}.png?set=set4'
+  ];
+
   /* ---------- Defaults (tuned for long-run realism) ---------- */
   const DEFAULT = {
     size: 100000,       // default message count
@@ -70,8 +84,14 @@
     replyFraction: 0.06,
     attachmentFraction: 0.04,
     pinnedFraction: 0.0008,
-    adminSpeakBoost: 0.04
+    adminSpeakBoost: 0.04 // chance for admin/mod messages
   };
+
+  /* ---------- Fixed special members (admin/mod) ---------- */
+  const SPECIAL_MEMBERS = [
+    { name: 'profit_hunters', displayName: 'Profit Hunters', role: 'ADMIN' },
+    { name: 'kitty_star', displayName: 'Kitty Star', role: 'MOD' }
+  ];
 
   /* ---------- Helpers ---------- */
   function pickFrom(arr, rnd) { if(!arr || !arr.length) return null; return arr[Math.floor(rnd()*arr.length)]; }
@@ -86,6 +106,25 @@
     if(token === 'DOGE') base = 0.08;
     const jitter = (rnd()-0.5) * base * 0.12;
     return Math.max(0.0001, base + jitter);
+  }
+
+  // simple hash to numeric (for deterministic avatar provider selection)
+  function simpleHashToInt(str){
+    let h = 2166136261 >>> 0;
+    for(let i=0;i<str.length;i++){
+      h ^= str.charCodeAt(i);
+      h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+    }
+    return h >>> 0;
+  }
+
+  // build avatar URL from name/seed deterministic across calls
+  function buildAvatarFor(seed, fallbackIdx){
+    const s = String(seed || '').trim() || ('user-' + Math.floor(Math.random()*100000));
+    const idx = typeof fallbackIdx === 'number' ? (fallbackIdx % AVATAR_PROVIDERS.length) : (simpleHashToInt(s) % AVATAR_PROVIDERS.length);
+    const tpl = AVATAR_PROVIDERS[idx];
+    const out = tpl.replace('{seed}', encodeURIComponent(s));
+    return out;
   }
 
   // FNV-ish content hash (fast, deterministic)
@@ -117,22 +156,48 @@
   const MessagePool = {
     messages: [],
     meta: Object.assign({}, DEFAULT),
+    // cache for deterministic avatar per-sender
+    _avatarCache: {},
 
     // generate message for index i deterministically
     _generateMessageForIndex(i, opts){
       opts = opts || {};
       const seedBase = Number(opts.seedBase || this.meta.seedBase || DEFAULT.seedBase);
-      const rnd = xorshift32(seedBase + (i * 15721)); // deterministic per-index PRNG
+      // per-index PRNG
+      const rnd = xorshift32(seedBase + (i * 15721));
+
+      // Optionally allow explicit startDate (ISO string or Date) to set earliest timestamp
+      const explicitStart = opts.startDate ? (new Date(opts.startDate)).getTime() : null;
 
       // pick sender from SyntheticPeople if available
       let sender = null;
       const sp = (window.SyntheticPeople && Array.isArray(window.SyntheticPeople.people) && window.SyntheticPeople.people.length) ? window.SyntheticPeople : null;
-      if(sp){
-        // bias toward more active accounts (simple deterministic selection)
+
+      // admin/mod boost: occasionally use special members
+      const useSpecial = rnd() < (opts.adminSpeakBoost || this.meta.adminSpeakBoost || DEFAULT.adminSpeakBoost);
+      if(useSpecial){
+        const s = SPECIAL_MEMBERS[Math.floor(rnd()*SPECIAL_MEMBERS.length)];
+        sender = { name: s.name, displayName: s.displayName, role: s.role, avatar: '' };
+      } else if(sp){
         const idx = Math.floor(rnd() * sp.people.length);
         sender = sp.people[idx];
       } else {
         sender = { name: 'Member_' + ((i % 5000) + 1), displayName: 'Member ' + ((i % 5000) + 1), role: 'VERIFIED', avatar: '' };
+      }
+
+      // ensure sender has deterministic avatar (if not supplied)
+      try{
+        if(!sender.avatar){
+          if(!this._avatarCache[sender.name]){
+            // produce per-sender avatar index to mix providers and avoid repeated dicebear-only
+            const pickSeed = `${sender.name}-${seedBase}`;
+            const pickIdx = simpleHashToInt(pickSeed) % AVATAR_PROVIDERS.length;
+            this._avatarCache[sender.name] = buildAvatarFor(pickSeed, pickIdx);
+          }
+          sender.avatar = this._avatarCache[sender.name];
+        }
+      }catch(e){
+        // fallback - do nothing
       }
 
       // template env
@@ -169,7 +234,7 @@
         text = parts.join(' ');
       } else if(tPick < 0.87){
         // trade/report style
-        text = `${sender.displayName.split(' ')[0]} posted: ${token} ${order} @ ${fmtPrice(price)} — TP ${tp} / SL ${stop} (${pct})`;
+        text = `${(sender.displayName||sender.name).split(' ')[0]} posted: ${token} ${order} @ ${fmtPrice(price)} — TP ${tp} / SL ${stop} (${pct})`;
       } else {
         // question/callout
         const q = pickFrom(['Anyone got thoughts on {token}?','Who else is holding {token}?','Is {indicator} bearish on {timeframe}?','Just saw a whale move on {token}'], rnd);
@@ -191,11 +256,11 @@
       // pinned (rare)
       const pinned = rnd() < (opts.pinnedFraction || this.meta.pinnedFraction);
 
-      // timestamp distribution across spanDays
+      // timestamp distribution across spanDays or explicit startDate
       const now = Date.now();
       const spanDays = Number(opts.spanDays || this.meta.spanDays || DEFAULT.spanDays);
       const frac = i / Math.max(1, (opts.size || this.meta.size || DEFAULT.size));
-      const earliest = now - spanDays * 86400000; // careful: 86400000 = 24*60*60*1000
+      const earliest = explicitStart !== null ? explicitStart : (now - spanDays * 86400000);
       const jitter = (rnd() - 0.5) * 3600000; // up to ±1h jitter
       const time = Math.round(earliest + frac * (spanDays * 86400000) + jitter);
 
@@ -227,22 +292,33 @@
       const seedBase = Number(opts.seedBase || this.meta.seedBase || DEFAULT.seedBase);
       const spanDays = Number(opts.spanDays || this.meta.spanDays || DEFAULT.spanDays);
 
+      // accept optional explicit startDate (ISO or Date)
+      if(opts.startDate){
+        try{ opts.startDate = new Date(opts.startDate).toISOString(); }catch(e){ delete opts.startDate; }
+      }
+
       this.meta.size = size;
       this.meta.seedBase = seedBase;
       this.meta.spanDays = spanDays;
 
-      const lru = makeLRU(2048);
+      const lru = makeLRU(4096); // larger LRU to reduce duplicates further
       const arr = new Array(size);
       for(let i=0;i<size;i++){
-        let m = this._generateMessageForIndex(i, { size, seedBase, spanDays, replyFraction: this.meta.replyFraction, attachmentFraction: this.meta.attachmentFraction });
-        // dedupe attempts
+        let m = this._generateMessageForIndex(i, Object.assign({}, opts, { size, seedBase, spanDays }));
+        // dedupe attempts - increased attempts to reduce repeats
         let attempts = 0;
         let h = contentHash(m.text);
-        while(lru.has(h) && attempts < 6){
+        while(lru.has(h) && attempts < 10){
           // regenerate with slight seed tweak to vary wording
-          const alt = this._generateMessageForIndex(i + attempts + 1, { size, seedBase: seedBase + attempts + 1, spanDays });
-          // pickFrom expects a rnd function; pass generator
-          m.text = alt.text + ((attempts % 2 === 0) ? (' ' + pickFrom(EMOJI, xorshift32(seedBase + attempts + i))) : '');
+          const alt = this._generateMessageForIndex(i + attempts + 1, { size, seedBase: seedBase + attempts + 1, spanDays, startDate: opts.startDate });
+          // ensure alt exists
+          if(alt && alt.text){
+            // append a small qualifier or emoji to vary content deterministically
+            const rnd = xorshift32(seedBase + attempts + i);
+            m.text = alt.text + ((attempts % 2 === 0) ? (' ' + pickFrom(EMOJI, rnd)) : (' · ' + pickFrom(TOKENS, rnd)));
+          } else {
+            m.text = m.text + ' ' + Math.random().toString(36).slice(2,5);
+          }
           h = contentHash(m.text);
           attempts++;
         }
